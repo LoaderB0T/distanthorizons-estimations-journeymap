@@ -1,0 +1,42 @@
+modLoader="javafml"
+loaderVersion="${loader_version_range}"
+license="${mod_license}"
+
+[[mods]]
+modId="${mod_id}"
+version="${mod_version}"
+displayName="${mod_name}"
+description='''
+Fills unexplored parts of the JourneyMap fullscreen map with sepia-tinted terrain estimated from Distant Horizons LODs.
+'''
+
+[[mixins]]
+config="${mod_id}.mixins.json"
+
+[[dependencies.${mod_id}]]
+    modId="neoforge"
+    type="required"
+    versionRange="[${neo_version},)"
+    ordering="NONE"
+    side="CLIENT"
+
+[[dependencies.${mod_id}]]
+    modId="minecraft"
+    type="required"
+    versionRange="${minecraft_version_range}"
+    ordering="NONE"
+    side="CLIENT"
+
+[[dependencies.${mod_id}]]
+    modId="journeymap"
+    type="required"
+    versionRange="*"
+    ordering="AFTER"
+    side="CLIENT"
+
+[[dependencies.${mod_id}]]
+    modId="distanthorizons"
+    type="required"
+    versionRange="*"
+    ordering="AFTER"
+    side="CLIENT"
