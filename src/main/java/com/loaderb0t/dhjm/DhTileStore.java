@@ -2,10 +2,8 @@ package com.loaderb0t.dhjm;
 
 import com.mojang.blaze3d.platform.NativeImage;
 import com.mojang.logging.LogUtils;
-import journeymap.client.io.FileHandler;
-import net.minecraft.client.Minecraft;
+import journeymap.api.v2.client.IClientAPI;
 import net.minecraft.resources.ResourceLocation;
-import net.neoforged.fml.loading.FMLPaths;
 import org.slf4j.Logger;
 
 import java.io.DataInputStream;
@@ -24,9 +22,8 @@ import java.util.zip.GZIPOutputStream;
 
 /**
  * Persists baked estimate tiles so they show instantly next session (and survive DH dropping data).
- * Layout: {@code <game>/dhjourneymap/<sp|mp>/<world>/<dim>/<rx>,<rz>.png} + {@code .biomes} (gzip).
- * World naming follows JourneyMap's own per-world folder, so it lines up with the real map.
- * Only this folder is ever touched; JourneyMap's data is never read or written.
+ * Layout: {@code <JM addon-data folder>/<dim>/<rx>,<rz>.png} + {@code .biomes} (gzip), see {@link #worldDir()}.
+ * Only this folder is ever touched; JourneyMap's own map data is never read or written.
  */
 final class DhTileStore {
     private static final Logger LOG = LogUtils.getLogger();
@@ -38,14 +35,15 @@ final class DhTileStore {
 
     private DhTileStore() {}
 
-    /** Cache folder for the current world, or null if there is none (e.g. main menu). Render thread. */
+    /**
+     * Cache folder for the current world, or null if there is none (e.g. main menu). Render thread.
+     * JourneyMap's official per-world addon folder: {@code journeymap/data/<sp|mp>/<world>/addon-data/dhjourneymap}.
+     */
     static Path worldDir() {
-        Minecraft mc = Minecraft.getInstance();
-        if (mc.level == null) return null;
         try {
-            File jm = FileHandler.getJMWorldDir(mc); // .../journeymap/data/<sp|mp>/<world>
-            if (jm == null) return null;
-            return FMLPaths.GAMEDIR.get().resolve(DhJourneyMap.MOD_ID).resolve(jm.getParentFile().getName()).resolve(jm.getName());
+            IClientAPI api = DhMapPlugin.api();
+            File dir = api == null ? null : api.getDataPath(DhJourneyMap.MOD_ID);
+            return dir == null ? null : dir.toPath();
         } catch (Throwable t) {
             LOG.warn("Can't resolve the estimate cache folder; estimates won't be saved this session", t);
             return null;
@@ -110,7 +108,7 @@ final class DhTileStore {
                     } else {
                         for (int i = 0; i < biomeAt.length; i++) {
                             int s = in.readShort();
-                            biomeAt[i] = s < 0 || s >= 255 ? 0 : (byte) (s + 1); // v1 index -> v2 code
+                            biomeAt[i] = s < 0 || s >= 254 ? 0 : (byte) (s + 1); // v1 index -> v2 code
                         }
                     }
                     biomes = b; // codes past biomes.length are ignored on lookup
@@ -120,6 +118,32 @@ final class DhTileStore {
             Arrays.fill(biomeAt, (byte) 0); // tile still shows, just without hover biomes
         }
         return new Stored(image, biomes, biomeAt);
+    }
+
+    /** Packed (rx, rz) of every region saved for one dimension. Any thread; lists one folder, no file reads. */
+    static java.util.Set<Long> listSaved(Path worldDir, String dim) {
+        java.util.Set<Long> out = new java.util.HashSet<>();
+        Path folder = base(worldDir, dim, 0, 0).getParent();
+        if (!Files.isDirectory(folder)) return out;
+        try (Stream<Path> files = Files.list(folder)) {
+            files.forEach(p -> {
+                String name = p.getFileName().toString();
+                if (!name.endsWith(".png")) return;
+                int comma = name.indexOf(',');
+                try {
+                    out.add(pack(Integer.parseInt(name.substring(0, comma)), Integer.parseInt(name.substring(comma + 1, name.length() - 4))));
+                } catch (RuntimeException ignored) {
+                    // not one of ours
+                }
+            });
+        } catch (IOException e) {
+            LOG.warn("Failed to list saved estimate tiles in {}", folder, e);
+        }
+        return out;
+    }
+
+    static long pack(int rx, int rz) {
+        return (long) rx << 32 | (rz & 0xFFFFFFFFL);
     }
 
     /** Deletes every saved estimate tile of one world. Any thread. */

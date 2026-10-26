@@ -28,12 +28,25 @@ neoForge {
     }
 }
 
+repositories {
+    // Mod jars straight from Modrinth (https://support.modrinth.com/en/articles/8801191-modrinth-maven).
+    exclusiveContent {
+        forRepository { maven { name = 'Modrinth'; url = 'https://api.modrinth.com/maven' } }
+        filter { includeGroup 'maven.modrinth' }
+    }
+    // JourneyMap's official API artifacts.
+    exclusiveContent {
+        forRepository { maven { name = 'JourneyMap'; url = 'https://jm.gserv.me/repository/maven-public/' } }
+        filter { includeGroup 'info.journeymap' }
+    }
+}
+
 dependencies {
-    // Compiled against the exact jars from the Modrinth profile (copied into ./libs).
-    // JourneyMap internals are mixin targets, DH core classes are read directly.
-    compileOnly files('libs/journeymap-neoforge-1.21.1-6.0.9.jar')
-    compileOnly files('libs/journeymap-api-neoforge-2.0.0-1.21.1.jar')
-    compileOnly files('libs/DistantHorizons-3.3.3-1.21.1-fabric-neoforge.jar')
+    // compileOnly: nothing from JourneyMap or Distant Horizons is bundled into our jar.
+    // The full JourneyMap jar is needed because its internals are mixin targets; DH core classes are read directly.
+    compileOnly "maven.modrinth:journeymap:${journeymap_version}"
+    compileOnly "info.journeymap:journeymap-api-neoforge:${journeymap_api_version}"
+    compileOnly "maven.modrinth:distanthorizons:${distanthorizons_version}"
 }
 
 var generateModMetadata = tasks.register("generateModMetadata", ProcessResources) {
@@ -46,6 +59,8 @@ var generateModMetadata = tasks.register("generateModMetadata", ProcessResources
             mod_name               : mod_name,
             mod_license            : mod_license,
             mod_version            : mod_version,
+            mod_authors            : mod_authors,
+            mod_description        : mod_description,
     ]
     inputs.properties replaceProperties
     expand replaceProperties
@@ -59,9 +74,16 @@ tasks.withType(JavaCompile).configureEach {
     options.encoding = 'UTF-8'
 }
 
-// Copy the built jar straight into the game profile.
+jar {
+    // Ship our licence inside the jar.
+    def licenseName = "LICENSE_${mod_id}" // captured now: the configuration cache can't read project props at execution
+    from('LICENSE') { rename { licenseName } }
+}
+
+// Optional: copy the built jar into a game instance's mods folder.
+//   gradlew installToProfile -PinstallDir="C:/path/to/instance/mods"
+// or set installDir in ~/.gradle/gradle.properties so it stays out of the repo.
 tasks.register('installToProfile', Copy) {
-    dependsOn tasks.named('jar')
     from tasks.named('jar')
-    into 'C:/Users/rndmB/AppData/Roaming/ModrinthApp/profiles/NeoForge 1.21.1/mods'
+    into providers.gradleProperty('installDir')
 }

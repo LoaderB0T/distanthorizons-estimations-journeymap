@@ -1,9 +1,10 @@
 package com.loaderb0t.dhjm.mixin;
 
+import com.loaderb0t.dhjm.DhMapPlugin;
 import com.loaderb0t.dhjm.DhTiles;
 import com.mojang.blaze3d.systems.RenderSystem;
 import journeymap.api.v2.client.display.Context;
-import journeymap.client.model.map.MapType;
+import journeymap.api.v2.client.util.UIState;
 import journeymap.client.model.region.RegionCoord;
 import journeymap.client.render.map.MapRenderer;
 import net.minecraft.client.gui.GuiGraphics;
@@ -23,6 +24,9 @@ import java.awt.geom.Rectangle2D;
 /**
  * Draws DH estimated terrain underneath JourneyMap's fullscreen region tiles. JM tiles are transparent
  * where nothing was mapped, so the estimate only shows through in unexplored areas.
+ * <p>
+ * The only JourneyMap internals the mod still touches: JM's addon API can only draw overlays on top of the map, which
+ * would need several image copies per region (see README). Map type and dimension come from the official UIState.
  */
 @Mixin(value = MapRenderer.class, remap = false)
 public abstract class MapRendererMixin {
@@ -31,7 +35,6 @@ public abstract class MapRendererMixin {
     @Shadow protected double centerBlockZ;
     @Shadow protected volatile RegionCoord centerRegion;
     @Shadow protected volatile Rectangle2D.Double regionBounds;
-    @Shadow protected volatile MapType mapType;
     @Shadow @Final protected Context.UI contextUi;
     @Shadow @Final private Point2D.Double centerPixelOffset;
 
@@ -39,8 +42,9 @@ public abstract class MapRendererMixin {
     public abstract Point2D.Double getBlockPixelInGrid(BlockPos pos);
 
     private boolean dhjm$active() {
-        return DhTiles.enabled() && contextUi == Context.UI.Fullscreen && mapType != null && !mapType.isUnderground()
-                && centerRegion != null && regionBounds != null;
+        if (!DhTiles.enabled() || contextUi != Context.UI.Fullscreen || centerRegion == null || regionBounds == null) return false;
+        UIState state = DhMapPlugin.fullscreenState();
+        return state != null && state.dimension != null && state.mapType != Context.MapType.Underground;
     }
 
     // Fullscreen draws tiles at 80% alpha; that would let the estimate bleed through real map data.
@@ -58,7 +62,7 @@ public abstract class MapRendererMixin {
         }
         RenderSystem.disableDepthTest();
         try {
-            String dim = mapType.dimension.location().toString();
+            String dim = DhMapPlugin.fullscreenState().dimension.location().toString();
             DhTiles.beginFrame(dim);
 
             // Mirrors RegionTile.setPosition + render so the estimate lines up with JM's tiles pixel for pixel.
@@ -67,13 +71,11 @@ public abstract class MapRendererMixin {
             Rectangle2D.Double bounds = regionBounds;
             int minX = (int) bounds.x, minZ = (int) bounds.y;
 
-            for (int rx = minX; rx < minX + (int) bounds.width; rx++) {
-                for (int rz = minZ; rz < minZ + (int) bounds.height; rz++) {
-                    int x = (int) ((int) corner.getX() + zoom * (rx - center.regionX) + offsetX);
-                    int y = (int) ((int) corner.getY() + zoom * (rz - center.regionZ) + offsetZ);
-                    DhTiles.draw(graphics, dim, rx, rz, x + centerPixelOffset.x, y + centerPixelOffset.y, zoom);
-                }
-            }
+            int cornerX = (int) corner.getX(), cornerY = (int) corner.getY(), size = zoom;
+            double pixelOffsetX = centerPixelOffset.x, pixelOffsetY = centerPixelOffset.y;
+            DhTiles.drawVisible(graphics, dim, minX, minZ, minX + (int) bounds.width, minZ + (int) bounds.height, size,
+                    rx -> (int) (cornerX + size * (rx - center.regionX) + offsetX) + pixelOffsetX,
+                    rz -> (int) (cornerY + size * (rz - center.regionZ) + offsetZ) + pixelOffsetY);
             DhTiles.endFrame();
         } catch (Throwable t) {
             DhTiles.fail("drawing the map estimate", t);

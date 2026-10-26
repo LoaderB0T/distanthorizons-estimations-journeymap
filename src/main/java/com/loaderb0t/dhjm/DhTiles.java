@@ -52,10 +52,11 @@ import java.util.concurrent.LinkedBlockingDeque;
 public final class DhTiles {
     private static final Logger LOG = LogUtils.getLogger();
 
-    // DH section detail 8 = 256 blocks wide, 64 columns of 4 blocks -> 128px per region.
-    // Detail 9 (one section == one region, 8 blocks/column) is painted first as fallback where 8 is missing.
+    // DH section detail 8 = 256 blocks wide, 64 columns of 4 blocks -> 128px per region (4 sections per region).
+    // Gaps fall back to coarser sections up to detail 12 (4096 blocks, 64 blocks/column): DH stores distant terrain
+    // only at coarse levels, finer data appears near the player first.
     private static final byte FINE = 8;
-    private static final byte COARSE = 9;
+    private static final byte COARSEST = 12;
     private static final int PX = 128;
     private static final int BLOCKS_PER_PX = 512 / PX;
 
@@ -106,6 +107,8 @@ public final class DhTiles {
     private static final Map<Key, Mode> WANTED_MODE = new HashMap<>();
     private static Object lastWorld;
     private static long frame;
+    // Settings read once per frame (not per region: at far zoom-out the visible grid has hundreds of thousands).
+    private static long radiusBlocks, refreshMs;
     // Uploading is cheap, but a burst after a big zoom-out shouldn't land in one frame.
     private static final int MAX_UPLOADS_PER_FRAME = 16;
 
@@ -117,6 +120,8 @@ public final class DhTiles {
     private static final LinkedBlockingDeque<Request> QUEUE = new LinkedBlockingDeque<>();
     /** Disk cache folder of the current world, null = don't persist. */
     private static volatile java.nio.file.Path cacheDir;
+    /** Per dimension: packed (rx, rz) of regions saved on disk, filled in the background. Outside the build radius only these are visited. */
+    private static final ConcurrentHashMap<String, Set<Long>> SAVED = new ConcurrentHashMap<>();
     private static final Set<Key> IN_FLIGHT = ConcurrentHashMap.newKeySet(); // taken by a worker, not yet consumed
     private static final ConcurrentLinkedQueue<Baked> DONE = new ConcurrentLinkedQueue<>();
     private static volatile boolean colorFailLogged;
@@ -182,11 +187,15 @@ public final class DhTiles {
         Object world = SharedApi.getAbstractDhWorld();
         int gen = generation;
         if (world != lastWorld || gen != clearedGeneration) {
-            if (world != lastWorld) cacheDir = DhTileStore.worldDir();
+            if (world != lastWorld) {
+                cacheDir = DhTileStore.worldDir();
+                SAVED.clear();
+            }
             lastWorld = world;
             clearedGeneration = gen;
             releaseAll();
         }
+        if (cacheDir == null) cacheDir = DhTileStore.worldDir(); // JM may set up its per-world folder a bit later
         lastDim = dim;
         LocalPlayer player = Minecraft.getInstance().player;
         if (player != null) {
@@ -196,6 +205,8 @@ public final class DhTiles {
             playerRz = Math.floorDiv(playerZ, 512);
         }
         frame++;
+        radiusBlocks = DhConfig.RADIUS_BLOCKS.get();
+        refreshMs = DhConfig.REFRESH_SECONDS.get() * 1000L;
         WANTED.clear();
         WANTED_MODE.clear();
 
@@ -268,16 +279,57 @@ public final class DhTiles {
         return true;
     }
 
-    /** Draws the DH estimate for region (rx, rz) as a size x size quad at (x, y) in the current pose. */
-    public static void draw(GuiGraphics graphics, String dim, int rx, int rz, double x, double y, int size) {
+    /** Screen position of a region's top-left corner along one axis. */
+    @FunctionalInterface
+    public interface RegionToScreen {
+        double at(int regionCoord);
+    }
+
+    /**
+     * Draws every estimate tile in the visible region range [minRx, maxRx) x [minRz, maxRz) as size x size quads and
+     * queues missing ones. Only regions that can show something are visited: those within the build radius, and
+     * saved ones outside it. So the cost stays flat however far the map is zoomed out.
+     */
+    public static void drawVisible(GuiGraphics graphics, String dim, int minRx, int minRz, int maxRx, int maxRz, int size,
+                                   RegionToScreen screenX, RegionToScreen screenY) {
+        Matrix4f m = graphics.pose().last().pose();
+        RenderSystem.setShader(GameRenderer::getPositionTexShader);
+        RenderSystem.enableBlend();
+        RenderSystem.defaultBlendFunc();
+
+        int rr = (int) Math.ceil(radiusBlocks / 512.0) + 1;
+        int ax = Math.max(minRx, playerRx - rr), bx = Math.min(maxRx, playerRx + rr + 1);
+        int az = Math.max(minRz, playerRz - rr), bz = Math.min(maxRz, playerRz + rr + 1);
+        for (int rx = ax; rx < bx; rx++) {
+            for (int rz = az; rz < bz; rz++) visit(m, dim, rx, rz, screenX.at(rx), screenY.at(rz), size);
+        }
+        for (long packed : savedIndex(dim)) {
+            int rx = (int) (packed >> 32), rz = (int) packed;
+            boolean visible = rx >= minRx && rx < maxRx && rz >= minRz && rz < maxRz;
+            boolean visitedAbove = rx >= ax && rx < bx && rz >= az && rz < bz;
+            if (visible && !visitedAbove) visit(m, dim, rx, rz, screenX.at(rx), screenY.at(rz), size);
+        }
+    }
+
+    private static Set<Long> savedIndex(String dim) {
+        java.nio.file.Path dir = cacheDir;
+        if (dir == null) return Set.of();
+        return SAVED.computeIfAbsent(dim, d -> {
+            Set<Long> set = ConcurrentHashMap.newKeySet();
+            java.util.concurrent.CompletableFuture.runAsync(() -> set.addAll(DhTileStore.listSaved(dir, d)));
+            return set;
+        });
+    }
+
+    private static void visit(Matrix4f m, String dim, int rx, int rz, double x, double y, int size) {
         // The radius limits what gets built from DH; saved tiles show everywhere.
-        long dx = rx * 512L + 256 - playerX, dz = rz * 512L + 256 - playerZ, r = DhConfig.RADIUS_BLOCKS.get();
-        boolean inRadius = dx * dx + dz * dz <= r * r;
+        long dx = rx * 512L + 256 - playerX, dz = rz * 512L + 256 - playerZ;
+        boolean inRadius = dx * dx + dz * dz <= radiusBlocks * radiusBlocks;
 
         Key key = new Key(dim, rx, rz);
         Tile tile = TILES.get(key);
         Long bakedAt = tile != null ? Long.valueOf(tile.bakedAt) : EMPTY.get(key);
-        boolean stale = bakedAt != null && System.currentTimeMillis() - bakedAt > DhConfig.REFRESH_SECONDS.get() * 1000L;
+        boolean stale = bakedAt != null && System.currentTimeMillis() - bakedAt > refreshMs;
         if (bakedAt == null) {
             want(key, inRadius ? Mode.LOAD : Mode.DISK_ONLY);
         } else if (stale && tile == null) {
@@ -288,12 +340,8 @@ public final class DhTiles {
         if (tile == null) return;
         tile.drawnFrame = frame;
 
-        Matrix4f m = graphics.pose().last().pose();
         float x0 = (float) x, y0 = (float) y, x1 = x0 + size, y1 = y0 + size;
-        RenderSystem.setShader(GameRenderer::getPositionTexShader);
         RenderSystem.setShaderTexture(0, tile.tex.getId());
-        RenderSystem.enableBlend();
-        RenderSystem.defaultBlendFunc();
         BufferBuilder buf = Tesselator.getInstance().begin(VertexFormat.Mode.QUADS, DefaultVertexFormat.POSITION_TEX);
         buf.addVertex(m, x0, y0, 0).setUv(0, 0);
         buf.addVertex(m, x0, y1, 0).setUv(0, 1);
@@ -332,6 +380,7 @@ public final class DhTiles {
         java.nio.file.Path dir = cacheDir != null ? cacheDir : DhTileStore.worldDir();
         invalidate(); // in-flight bakes are dropped and not saved
         releaseAll();
+        SAVED.clear();
         java.util.concurrent.CompletableFuture.runAsync(() -> DhTileStore.deleteWorld(dir));
     }
 
@@ -341,8 +390,22 @@ public final class DhTiles {
         if (dim == null) return null;
         BiomeGrid g = BIOMES.get(new Key(dim, Math.floorDiv(blockX, 512), Math.floorDiv(blockZ, 512)));
         if (g == null) return null;
-        int code = g.at[Math.floorMod(blockZ, 512) / BLOCKS_PER_PX * PX + Math.floorMod(blockX, 512) / BLOCKS_PER_PX] & 0xFF;
-        return code == 0 || code > g.biomes.length ? null : g.biomes[code - 1];
+        int code = biomeCodeAt(blockX, blockZ);
+        return code <= 0 || code > g.biomes.length ? null : g.biomes[code - 1];
+    }
+
+    /** True if an estimate tile has terrain at this block (with or without a biome name). Any thread. */
+    public static boolean estimateAt(int blockX, int blockZ) {
+        return biomeCodeAt(blockX, blockZ) > 0;
+    }
+
+    /** Raw per-pixel code (see biomeCode), -1 if no tile is loaded there. */
+    private static int biomeCodeAt(int blockX, int blockZ) {
+        String dim = lastDim;
+        if (dim == null) return -1;
+        BiomeGrid g = BIOMES.get(new Key(dim, Math.floorDiv(blockX, 512), Math.floorDiv(blockZ, 512)));
+        if (g == null) return -1;
+        return g.at[Math.floorMod(blockZ, 512) / BLOCKS_PER_PX * PX + Math.floorMod(blockX, 512) / BLOCKS_PER_PX] & 0xFF;
     }
 
     // ---------------------------------------------------------------- worker thread
@@ -369,6 +432,8 @@ public final class DhTiles {
                     // Saved before the render thread gets the image; skipped if settings changed or the cache was cleared meanwhile.
                     if (baked.image != null && dir != null && gen == generation) {
                         DhTileStore.save(dir, key.dim, key.rx, key.rz, baked.image, baked.biomes, baked.biomeAt);
+                        Set<Long> saved = SAVED.get(key.dim);
+                        if (saved != null) saved.add(DhTileStore.pack(key.rx, key.rz));
                     }
                 }
             } catch (Throwable t) {
@@ -405,8 +470,12 @@ public final class DhTiles {
                 painted += paint(image, biomeAt, palette, level, FINE, key.rx * 2 + i, key.rz * 2 + j, key, false, style);
             }
         }
-        // Only read the coarse section when fine data has gaps (usual case: it doesn't, saving a DB read).
-        if (painted < PX * PX) painted += paint(image, biomeAt, palette, level, COARSE, key.rx, key.rz, key, true, style);
+        // Coarser sections only where finer data left gaps (near the player usually none, saving DB reads).
+        for (byte d = FINE + 1; d <= COARSEST && painted < PX * PX; d++) {
+            int regionsPerSection = 1 << (d - 9); // detail 9 section == one region, 10 == 2x2 regions, ...
+            painted += paint(image, biomeAt, palette, level, d,
+                    Math.floorDiv(key.rx, regionsPerSection), Math.floorDiv(key.rz, regionsPerSection), key, true, style);
+        }
         if (painted == 0) {
             image.close();
             return Baked.empty(key, gen);
@@ -447,16 +516,19 @@ public final class DhTiles {
             int originZ = sz * 64 * blocksPerCol;
             int px0 = (originX - key.rx * 512) / BLOCKS_PER_PX;
             int pz0 = (originZ - key.rz * 512) / BLOCKS_PER_PX;
+            // Sections coarser than detail 9 are bigger than a region: only touch the columns inside this one.
+            int xFrom = Math.max(0, Math.floorDiv(-px0, pxPerCol)), xTo = Math.min(64, Math.floorDiv(PX - px0 + pxPerCol - 1, pxPerCol));
+            int zFrom = Math.max(0, Math.floorDiv(-pz0, pxPerCol)), zTo = Math.min(64, Math.floorDiv(PX - pz0 + pxPerCol - 1, pxPerCol));
 
             int[] color = new int[64 * 64];
             int[] height = new int[64 * 64];
             boolean[] liquid = new boolean[64 * 64];
             byte[] biome = new byte[64 * 64];
+            java.util.Arrays.fill(height, Integer.MIN_VALUE);
             boolean any = false;
-            for (int x = 0; x < 64; x++) {
-                for (int z = 0; z < 64; z++) {
+            for (int x = xFrom; x < xTo; x++) {
+                for (int z = zFrom; z < zTo; z++) {
                     int i = x * 64 + z;
-                    height[i] = Integer.MIN_VALUE;
                     LongArrayList col = ds.tryGetColumnAtRelPos(x, z);
                     if (col == null) continue;
                     // Columns are stored top-down. One LOD column covers several blocks, so a single flower or
@@ -489,8 +561,8 @@ public final class DhTiles {
             if (!any) return 0;
 
             int painted = 0;
-            for (int x = 0; x < 64; x++) {
-                for (int z = 0; z < 64; z++) {
+            for (int x = xFrom; x < xTo; x++) {
+                for (int z = zFrom; z < zTo; z++) {
                     int i = x * 64 + z;
                     if (height[i] == Integer.MIN_VALUE) continue;
                     float shade = liquid[i] || !style.hillshade ? 1f : relief(height, i, x, z, blocksPerCol);
@@ -538,14 +610,17 @@ public final class DhTiles {
     }
 
     /**
-     * Per-pixel biome as one unsigned byte: 0 = unknown, 1..255 = palette index + 1. A region with more than
-     * 255 distinct biomes (practically impossible) just shows no hover biome for the extra ones.
+     * Per-pixel biome as one unsigned byte: 0 = no estimate, 1..254 = palette index + 1, 255 = estimated terrain
+     * without a biome name. A region with more than 254 distinct biomes (practically impossible) treats the extra
+     * ones as unnamed.
      */
     private static byte biomeCode(Map<ResourceLocation, Integer> palette, IBiomeWrapper biome) {
         // DH's getName() returns the registry name, and biomes loaded from its database are key-less
         // Holder.Direct, so the serial string ("minecraft:plains") is the only reliable id.
+        // DH stores "" (read back as its "EMPTY" placeholder) when its own world generator produced a biome it
+        // couldn't name; that's "unknown", not a biome.
         ResourceLocation id = ResourceLocation.tryParse(biome.getSerialString());
-        if (id == null) return 0;
+        if (!isRealBiome(id)) return UNKNOWN_BIOME;
         Integer idx = palette.get(id);
         if (idx == null) {
             if (palette.size() >= MAX_BIOMES) {
@@ -553,7 +628,7 @@ public final class DhTiles {
                     biomeOverflowLogged = true;
                     LOG.debug("More than {} biomes in one region; extra biomes won't show in the hover text", MAX_BIOMES);
                 }
-                return 0;
+                return UNKNOWN_BIOME;
             }
             idx = palette.size();
             palette.put(id, idx);
@@ -561,7 +636,14 @@ public final class DhTiles {
         return (byte) (idx + 1);
     }
 
-    private static final int MAX_BIOMES = 255;
+    /** False for DH's unnamed-biome placeholders ("", "EMPTY"); also used for tiles saved before this check existed. */
+    static boolean isRealBiome(ResourceLocation id) {
+        return id != null && !id.getPath().isEmpty() && !id.getPath().equalsIgnoreCase("empty");
+    }
+
+    private static final int MAX_BIOMES = 254;
+    /** Pixel has estimated terrain but no biome name (DH lost it, or palette full). */
+    private static final byte UNKNOWN_BIOME = (byte) 255;
     private static volatile boolean biomeOverflowLogged;
 
     /** Texture that lives only on the GPU: the image is freed right after upload (DynamicTexture keeps a RAM copy). */

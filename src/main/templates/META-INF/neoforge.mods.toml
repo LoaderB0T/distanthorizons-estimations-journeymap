@@ -1,13 +1,17 @@
 modLoader="javafml"
 loaderVersion="${loader_version_range}"
 license="${mod_license}"
+issueTrackerURL="https://github.com/LoaderB0T/distanthorizons-estimations-journeymap/issues"
 
 [[mods]]
 modId="${mod_id}"
 version="${mod_version}"
 displayName="${mod_name}"
+authors="${mod_authors}"
+displayURL="https://github.com/LoaderB0T/distanthorizons-estimations-journeymap"
+credits="Not affiliated with JourneyMap or Distant Horizons. Built on JourneyMap's addon API and Distant Horizons' LOD data."
 description='''
-Fills unexplored parts of the JourneyMap fullscreen map with sepia-tinted terrain estimated from Distant Horizons LODs.
+${mod_description}
 '''
 
 [[mixins]]

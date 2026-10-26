@@ -39,5 +39,5 @@ run/
 repo/
 !**/src/**/repo/
 
-# third-party jars copied from the game profile
+# Never commit third-party mod jars (the build downloads them)
 libs/

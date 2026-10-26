@@ -14,7 +14,7 @@
   "dhjourneymap.configuration.hideDecoration": "Ignore flowers & grass",
   "dhjourneymap.configuration.hideDecoration.tooltip": "Use the ground below flowers, grass, saplings etc. Avoids coloured specks, since one map pixel covers 4x4 blocks.",
   "dhjourneymap.configuration.biomeOnHover": "Biome on hover",
-  "dhjourneymap.configuration.biomeOnHover.tooltip": "Show the DH biome in the map's hover text where JourneyMap has no data.",
+  "dhjourneymap.configuration.biomeOnHover.tooltip": "Show a tooltip with the DH biome when hovering estimated areas (only where JourneyMap has no data).",
   "dhjourneymap.configuration.refreshSeconds": "Refresh interval (seconds)",
   "dhjourneymap.configuration.refreshSeconds.tooltip": "How often visible estimated tiles are rebuilt to pick up newly generated DH terrain.",
   "dhjourneymap.configuration.maxTiles": "Max regions in memory",
@@ -24,5 +24,6 @@
   "dhjourneymap.configuration.clearEstimate": "Clear estimated map...",
   "dhjourneymap.configuration.clearEstimate.tooltip": "Delete the saved DH estimate for this world. JourneyMap's real map is not touched. Only available in a world.",
   "dhjourneymap.clearEstimate.confirm.title": "Clear the estimated map for this world?",
-  "dhjourneymap.clearEstimate.confirm.message": "Deletes all saved DH estimate tiles (all dimensions). JourneyMap's real map stays as it is. The estimate rebuilds from Distant Horizons data the next time you open the map."
+  "dhjourneymap.clearEstimate.confirm.message": "Deletes all saved DH estimate tiles (all dimensions). JourneyMap's real map stays as it is. The estimate rebuilds from Distant Horizons data the next time you open the map.",
+  "dhjourneymap.hover.biome": "%s (estimated)"
 }
